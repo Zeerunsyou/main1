@@ -1081,12 +1081,11 @@ function AutoFarm:Reset()
     end)
 end
 
--- Briefly attempt the same close-range launch used by launch.lua against the
--- round's murderer. The attempt is bounded and exits immediately on death.
+-- Briefly attempt the close-range launch used by launch.lua against the
+-- round's murderer. Stop the attempt immediately if this character dies.
 function AutoFarm:TryLaunchMurderer()
     local MurdererName = self:GetPlayersWithRole("Murderer")[1]
     local TargetPlayer = MurdererName and game:GetService("Players"):FindFirstChild(MurdererName)
-    local Character = GetCharacter(self)
     local Humanoid = GetHumanoid(self)
     local RootPart = GetHRP(self)
     local TargetCharacter = TargetPlayer and TargetPlayer.Character
