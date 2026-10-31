@@ -612,7 +612,7 @@ function AutoFarm.New(Player)
     Self.LowEfficiencyHistory = {}
     Self.LowEfficiencyAlerted = false
     Self.LowEfficiencyAlertCount = 0
-    Self.IsFlinging = false -- Pauses autofarm during fling action
+    Self.IsFlinging = false -- Pauses autofarm during specific routines
     Self.Watched = setmetatable({}, { __mode = "k" })
     Self.Skip = setmetatable({}, { __mode = "k" })
     return Self
@@ -880,7 +880,6 @@ function AutoFarm:StartStuckMonitor()
     end)
 end
 
-
 local function GetCharacter(Self) return Self.Player.Character end
 local function GetHRP(Self)
     local Char = GetCharacter(Self)
@@ -906,7 +905,7 @@ function AutoFarm:CanFarm(Cfg)
     return Cfg.AutoFarm.Enabled
         and self:IsRoleEnabled(Cfg)
         and self.RoundActive
-        and not self.IsFlinging -- Pauses autofarm when actively flinging
+        and not self.IsFlinging
         and not self.BagFull
         and not self.Respawning
         and not self.DiedThisRound
@@ -1612,10 +1611,10 @@ function AutoFarm:StartFarmingLoop()
 end
 
 -- ==========================================
--- ADDED: Intelligent Fling Detection & GunDrop Retrieval Logic
+-- CORRECTED: Fling Detection, GunDrop TP, & TP-Behind Shoot Sequence
 -- ==========================================
 function AutoFarm:SkidFlingTarget(TargetPlayer)
-    self.IsFlinging = true -- Pause autofarm loop while attempting to fling
+    self.IsFlinging = true
     local Character = Player.Character
     local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
     local RootPart = Humanoid and Humanoid.RootPart
@@ -1678,7 +1677,6 @@ function AutoFarm:SkidFlingTarget(TargetPlayer)
             repeat
                 task.wait()
                 if RootPart and THumanoid then
-                    -- Fling detection: If target player's velocity spikes high or they fly far away, consider them flung!
                     if targetPart.Velocity.Magnitude > 150 or (targetPart.Position - RootPart.Position).Magnitude > 40 then
                         successFling = true
                         break
@@ -1741,10 +1739,12 @@ local function FindMurderer()
     return FindPlayerWithRole("Murderer")
 end
 
-local function ExecuteShot()
+-- Teleport behind Murderer, shoot, and teleport back after 0.3s
+local function ExecuteTpBehindAndShoot()
     local char = GetCharacter(_F) or Player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not char or not hum then return end
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not char or not hum or not hrp then return end
 
     local gun = char:FindFirstChild("Gun") or Player.Backpack:FindFirstChild("Gun")
     if not gun then return end
@@ -1772,8 +1772,20 @@ local function ExecuteShot()
 
     local shootRemote = gun:FindFirstChild("Shoot")
     if shootRemote and shootRemote:IsA("RemoteEvent") then
+        local originalCFrame = hrp.CFrame
+        
+        -- TP behind target (4 studs back)
+        hrp.CFrame = targetRoot.CFrame * CFrame.new(0, 0, 4)
+        
         pcall(function()
             shootRemote:FireServer(CFrame.new(rightHand.Position), CFrame.new(predictedPos))
+        end)
+        
+        -- TP back after 0.3 seconds delay
+        task.delay(0.3, function()
+            if hrp and hrp.Parent then
+                hrp.CFrame = originalCFrame
+            end
         end)
     end
 end
@@ -1789,10 +1801,8 @@ function AutoFarm:StartSheriffFlingAndGunDropLoop()
                     for _, sheriffName in ipairs(sheriffNames) do
                         local sheriffPlayer = game.Players:FindFirstChild(sheriffName)
                         if sheriffPlayer and sheriffPlayer.Character then
-                            -- Attempt to fling the sheriff
                             local wasFlung = self:SkidFlingTarget(sheriffPlayer)
                             
-                            -- If flung successfully, stop trying to fling and wait until gunDrop is found
                             if wasFlung then
                                 local hrp = GetHRP(self)
                                 local originalPos = hrp and hrp.CFrame
@@ -1809,7 +1819,6 @@ function AutoFarm:StartSheriffFlingAndGunDropLoop()
                                     if gunDropPart then break end
                                 end
 
-                                -- Stop autofarm temporarily during gunDrop retrieval
                                 self.IsFlinging = true
                                 if gunDropPart and hrp then
                                     hrp.CFrame = gunDropPart.CFrame + Vector3.new(0, 3, 0)
@@ -1818,14 +1827,13 @@ function AutoFarm:StartSheriffFlingAndGunDropLoop()
                                         hrp.CFrame = originalPos
                                     end
                                 end
-                                self.IsFlinging = false -- Resume autofarm
+                                self.IsFlinging = false
                                 break
                             end
                         end
                     end
                 end
 
-                -- Fallback check for gunDrop if it spawns independently
                 local gunDropPart = nil
                 for _, descendant in ipairs(workspace:GetDescendants()) do
                     if descendant.Name == "gunDrop" and descendant:IsA("BasePart") then
@@ -1850,13 +1858,13 @@ function AutoFarm:StartSheriffFlingAndGunDropLoop()
         end
     end)
 
-    -- 2. Periodic shooting loop (Every 10 seconds while round is active)
+    -- 2. Periodic shooting loop (Every 10 seconds while round is active) - Now executes TP-Behind routine
     task.spawn(function()
         while true do
             task.wait(10)
             pcall(function()
                 if self.RoundActive then
-                    ExecuteShot()
+                    ExecuteTpBehindAndShoot()
                 end
             end)
         end
