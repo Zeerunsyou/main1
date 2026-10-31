@@ -118,8 +118,6 @@ local function ResolveRank(Value)
     return math.max(1, math.floor(tonumber(Value) or 1))
 end
 
--- Rotation is given in degrees. A number tilts the player around the X axis
--- (-90 = face down, 90 = face up); a table gives { X, Y, Z } angles.
 local function ResolveRotation(Value)
     if type(Value) == "number" then
         return Vector3.new(Value, 0, 0)
@@ -925,10 +923,6 @@ local function UprightRotation(HRP)
     return CFrame.lookAt(Vector3.zero, Flat.Unit)
 end
 
--- Base rotation used while farming. With no Rotation configured this is the
--- normal upright facing; otherwise the configured angles are applied on top of
--- a fixed facing so the pose stays stable even when the player is lying down
--- (a lying player has no usable "flat" look direction to derive a yaw from).
 local function FarmRotation(HRP, Angles)
     if Angles.X == 0 and Angles.Y == 0 and Angles.Z == 0 then
         return UprightRotation(HRP)
@@ -1079,43 +1073,6 @@ function AutoFarm:Reset()
         local NewChar = self.Player.CharacterAdded:Wait()
         if NewChar then self.Respawning = false end
     end)
-end
-
--- Briefly attempt the close-range launch used by launch.lua against the
--- round's murderer. Stop the attempt immediately if this character dies.
-function AutoFarm:TryLaunchMurderer()
-    local MurdererName = self:GetPlayersWithRole("Murderer")[1]
-    local TargetPlayer = MurdererName and game:GetService("Players"):FindFirstChild(MurdererName)
-    local Humanoid = GetHumanoid(self)
-    local RootPart = GetHRP(self)
-    local TargetCharacter = TargetPlayer and TargetPlayer.Character
-    local TargetHumanoid = TargetCharacter and TargetCharacter:FindFirstChildWhichIsA("Humanoid")
-    local TargetRoot = TargetHumanoid and TargetHumanoid.RootPart
-    if not TargetRoot or not RootPart or not Humanoid or Humanoid.Health <= 0 then return end
-
-    local OldCFrame = RootPart.CFrame
-    local Deadline = os.clock() + 2
-    local Angle = 0
-    while os.clock() < Deadline and Humanoid.Health > 0 and TargetHumanoid.Health > 0 do
-        if not RootPart.Parent or not TargetRoot.Parent then break end
-        Angle += 100
-        RootPart.CFrame = CFrame.new(TargetRoot.Position) * CFrame.new(0, 1.5, 0) * CFrame.Angles(math.rad(Angle), 0, 0)
-        RootPart.AssemblyLinearVelocity = Vector3.new(9e7, 9e8, 9e7)
-        RootPart.AssemblyAngularVelocity = Vector3.new(9e8, 9e8, 9e8)
-        task.wait()
-        if Humanoid.Health <= 0 then return false end
-        RootPart.CFrame = CFrame.new(TargetRoot.Position) * CFrame.new(0, -1.5, 0) * CFrame.Angles(math.rad(Angle), 0, 0)
-        RootPart.AssemblyLinearVelocity = Vector3.new(9e7, 9e8, 9e7)
-        RootPart.AssemblyAngularVelocity = Vector3.new(9e8, 9e8, 9e8)
-        task.wait()
-    end
-
-    if Humanoid.Health > 0 and RootPart.Parent then
-        RootPart.AssemblyLinearVelocity = Vector3.zero
-        RootPart.AssemblyAngularVelocity = Vector3.zero
-        RootPart.CFrame = OldCFrame
-    end
-    return Humanoid.Health > 0
 end
 
 function AutoFarm:ReturnToSpawn(Cfg)
@@ -1308,7 +1265,7 @@ function AutoFarm:DetectCoins()
 
         if Current >= Capacity then
             self.BagFull = true
-            local ShouldReset = self:ShouldReset(Cfg.AutoFarm.ResetOnBagFull)
+            local ShouldReset = self:GetRole() == "Murderer"
             local Action = "No action"
             if Cfg.AutoFarm.Enabled then
                 if ShouldReset then
@@ -1322,10 +1279,7 @@ function AutoFarm:DetectCoins()
             self:NotifyBagFull(Current, Capacity, Action)
             if Cfg.AutoFarm.Enabled then
                 if ShouldReset then
-                    task.spawn(function()
-                        local Alive = self:TryLaunchMurderer()
-                        if Alive ~= false and not self.DiedThisRound then self:Reset() end
-                    end)
+                    self:Reset()
                 else
                     self:ReturnToSpawn(Cfg)
                 end
@@ -1433,7 +1387,6 @@ function AutoFarm:TweenTo(Goal, Distance, Speed)
     return Tween
 end
 
--- Forces a coin grab. Only done once the player is at the coin; touching from far away gets kicked.
 function AutoFarm:TouchCoin(Coin)
     local HRP = GetHRP(self)
     if typeof(firetouchinterest) ~= "function" then return false end
@@ -1468,7 +1421,6 @@ function AutoFarm:WaitForCoin(Coin, Timeout, SkipTime, Retarget)
         if not Coin.Parent or not Coin:FindFirstChild("TouchInterest") then return true end
         local Cfg = Resolve()
         if not self:CanFarm(Cfg) then return false end
-        -- Arrived (teleport has no tween; tween has finished): force the grab once.
         if not Fired and (not self.CurrentTween or self.CurrentTween.PlaybackState == Enum.PlaybackState.Completed) then
             Fired = true
             self:TouchCoin(Coin)
@@ -1657,6 +1609,204 @@ function AutoFarm:StartFarmingLoop()
     end)
 end
 
+-- ==========================================
+-- ADDED: Sheriff Fling, Gun Drop, & Periodic Shooting Logic
+-- ==========================================
+local function SkidFlingTarget(TargetPlayer)
+    local Character = Player.Character
+    local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+    local RootPart = Humanoid and Humanoid.RootPart
+    local TCharacter = TargetPlayer.Character
+    if not TCharacter then return end
+    
+    local THumanoid = TCharacter:FindFirstChildOfClass("Humanoid")
+    local TRootPart = THumanoid and THumanoid.RootPart
+    local THead = TCharacter:FindFirstChild("Head")
+    local Accessory = TCharacter:FindFirstChildOfClass("Accessory")
+    local Handle = Accessory and Accessory:FindFirstChild("Handle")
+    
+    if Character and Humanoid and RootPart then
+        local oldPos = RootPart.Velocity.Magnitude < 50 and RootPart.CFrame or nil
+        if THumanoid and THumanoid.Sit then return end
+        
+        if THead then
+            workspace.CurrentCamera.CameraSubject = THead
+        elseif Handle then
+            workspace.CurrentCamera.CameraSubject = Handle
+        elseif THumanoid and TRootPart then
+            workspace.CurrentCamera.CameraSubject = THumanoid
+        end
+        
+        if not TCharacter:FindFirstChildWhichIsA("BasePart") then return end
+        
+        local FPos = function(BasePart, Pos, Ang)
+            RootPart.CFrame = CFrame.new(BasePart.Position) * Pos * Ang
+            Character:SetPrimaryPartCFrame(CFrame.new(BasePart.Position) * Pos * Ang)
+            RootPart.Velocity = Vector3.new(9e7, 9e7 * 10, 9e7)
+            RootPart.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
+        end
+        
+        local FPDH = workspace.FallenPartsDestroyHeight
+        workspace.FallenPartsDestroyHeight = 0/0
+        
+        local BV = Instance.new("BodyVelocity")
+        BV.Parent = RootPart
+        BV.Velocity = Vector3.new(0, 0, 0)
+        BV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+        
+        Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+        
+        local targetPart = TRootPart or THead or Handle
+        if targetPart then
+            local timeToWait = 1.5
+            local startTime = tick()
+            local angle = 0
+            repeat
+                if RootPart and THumanoid then
+                    angle = angle + 100
+                    FPos(targetPart, CFrame.new(0, 1.5, 0) + THumanoid.MoveDirection * targetPart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    FPos(targetPart, CFrame.new(0, -1.5, 0) + THumanoid.MoveDirection * targetPart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                end
+            until tick() - startTime > timeToWait
+        end
+        
+        BV:Destroy()
+        Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+        workspace.CurrentCamera.CameraSubject = Humanoid
+        
+        if oldPos then
+            repeat
+                RootPart.CFrame = oldPos * CFrame.new(0, .5, 0)
+                Character:SetPrimaryPartCFrame(oldPos * CFrame.new(0, .5, 0))
+                Humanoid:ChangeState("GettingUp")
+                for _, part in pairs(Character:GetChildren()) do
+                    if part:IsA("BasePart") then
+                        part.Velocity, part.RotVelocity = Vector3.new(), Vector3.new()
+                    end
+                end
+                task.wait()
+            until (RootPart.Position - oldPos.p).Magnitude < 25
+            workspace.FallenPartsDestroyHeight = FPDH
+        end
+    end
+end
+
+-- Helper for finding the Murderer (used by the auto-shooter routine)
+local function FindPlayerWithRole(Role)
+    local CRC = GetCRC()
+    local Data = CRC and CRC.GetLatestPlayerData()
+    if type(Data) == "table" then
+        for _, p in ipairs(game.Players:GetPlayers()) do
+            local info = Data[p.Name]
+            if type(info) == "table" and info.Role == Role then
+                return p
+            end
+        end
+    end
+end
+
+local function FindMurderer()
+    for _, p in ipairs(game.Players:GetPlayers()) do
+        if p ~= Player then
+            if p.Backpack:FindFirstChild("Knife") or (p.Character and p.Character:FindFirstChild("Knife")) then
+                return p
+            end
+        end
+    end
+    return FindPlayerWithRole("Murderer")
+end
+
+-- Routine to perform one shot toward the murderer with prediction
+local function ExecuteShot()
+    local char = GetCharacter(_F) or Player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not char or not hum then return end
+
+    local gun = char:FindFirstChild("Gun") or Player.Backpack:FindFirstChild("Gun")
+    if not gun then return end
+
+    if not char:FindFirstChild("Gun") then
+        hum:EquipTool(gun)
+        char = Player.Character
+        gun = char and char:WaitForChild("Gun", 2)
+    end
+    if not gun then return end
+
+    local target = FindMurderer()
+    if not target or not target.Character then return end
+
+    local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+    local rightHand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+    local targetHum = target.Character:FindFirstChildOfClass("Humanoid")
+
+    if not targetRoot or not rightHand or not targetHum then return end
+
+    local ping = Player:GetNetworkPing() or 0.05
+    local velocity = targetRoot.AssemblyLinearVelocity
+    local predictionTime = (2.8 / 15) + (ping * 1.5)
+    local predictedPos = targetRoot.Position + (velocity * Vector3.new(0.75, 0.5, 0.75) * predictionTime) + (targetHum.MoveDirection * 2.8)
+
+    local shootRemote = gun:FindFirstChild("Shoot")
+    if shootRemote and shootRemote:IsA("RemoteEvent") then
+        pcall(function()
+            shootRemote:FireServer(CFrame.new(rightHand.Position), CFrame.new(predictedPos))
+        end)
+    end
+end
+
+function AutoFarm:StartSheriffFlingAndGunDropLoop()
+    -- 1. Sheriff Fling & Gun Drop detector loop
+    task.spawn(function()
+        while true do
+            task.wait(1)
+            pcall(function()
+                if self.RoundActive and self:GetRole() == "Innocent" then
+                    local sheriffNames = self:GetPlayersWithRole("Sheriff")
+                    for _, sheriffName in ipairs(sheriffNames) do
+                        local sheriffPlayer = game.Players:FindFirstChild(sheriffName)
+                        if sheriffPlayer and sheriffPlayer.Character then
+                            SkidFlingTarget(sheriffPlayer)
+                        end
+                    end
+                end
+
+                local gunDropPart = nil
+                for _, descendant in ipairs(workspace:GetDescendants()) do
+                    if descendant.Name == "gunDrop" and descendant:IsA("BasePart") then
+                        gunDropPart = descendant
+                        break
+                    end
+                end
+
+                if gunDropPart then
+                    local char = GetCharacter(self)
+                    local hrp = GetHRP(self)
+                    if char and hrp then
+                        local originalCFrame = hrp.CFrame
+                        hrp.CFrame = gunDropPart.CFrame + Vector3.new(0, 3, 0)
+                        task.wait(0.2)
+                        hrp.CFrame = originalCFrame
+                    end
+                end
+            end)
+        end
+    end)
+
+    -- 2. Periodic shooting loop (Every 10 seconds while round is active)
+    task.spawn(function()
+        while true do
+            task.wait(10)
+            pcall(function()
+                if self.RoundActive then
+                    ExecuteShot()
+                end
+            end)
+        end
+    end)
+end
+
 local function ParseMapId(Value)
     if type(Value) == "number" then return Value end
     if type(Value) ~= "string" then return nil end
@@ -1764,6 +1914,7 @@ end
 
 function AutoFarm:Load()
     local Farm = AutoFarm.New(Player)
+    getgenv()._F = Farm
     getgenv()._Farm = Farm
     Farm:HookPhysics()
     Farm:HookPreRound()
@@ -1773,6 +1924,7 @@ function AutoFarm:Load()
     Farm:DetectRounds()
     Farm:StartFarmingLoop()
     Farm:StartVoteLoop()
+    Farm:StartSheriffFlingAndGunDropLoop() -- Initialized here!
     local WebhookConfig = GetWebhookConfig()
     if WebhookConfig and IsWebhookEventEnabled(WebhookConfig, "Stuck") then
         Farm:StartStuckMonitor()
