@@ -612,6 +612,7 @@ function AutoFarm.New(Player)
     Self.LowEfficiencyHistory = {}
     Self.LowEfficiencyAlerted = false
     Self.LowEfficiencyAlertCount = 0
+    Self.IsFlinging = false -- Track active fling state
     Self.Watched = setmetatable({}, { __mode = "k" })
     Self.Skip = setmetatable({}, { __mode = "k" })
     return Self
@@ -905,6 +906,7 @@ function AutoFarm:CanFarm(Cfg)
     return Cfg.AutoFarm.Enabled
         and self:IsRoleEnabled(Cfg)
         and self.RoundActive
+        and not self.IsFlinging -- Pauses autofarm while flinging
         and not self.BagFull
         and not self.Respawning
         and not self.DiedThisRound
@@ -1610,14 +1612,18 @@ function AutoFarm:StartFarmingLoop()
 end
 
 -- ==========================================
--- ADDED: Sheriff Fling, Gun Drop, & Periodic Shooting Logic
+-- ADDED: Sheriff Fling (with AutoFarm pause), Gun Drop, & Periodic Shooting Logic
 -- ==========================================
-local function SkidFlingTarget(TargetPlayer)
+function AutoFarm:SkidFlingTarget(TargetPlayer)
+    self.IsFlinging = true -- Pause autofarm loop while flinging
     local Character = Player.Character
     local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
     local RootPart = Humanoid and Humanoid.RootPart
     local TCharacter = TargetPlayer.Character
-    if not TCharacter then return end
+    if not TCharacter then 
+        self.IsFlinging = false
+        return 
+    end
     
     local THumanoid = TCharacter:FindFirstChildOfClass("Humanoid")
     local TRootPart = THumanoid and THumanoid.RootPart
@@ -1627,7 +1633,10 @@ local function SkidFlingTarget(TargetPlayer)
     
     if Character and Humanoid and RootPart then
         local oldPos = RootPart.Velocity.Magnitude < 50 and RootPart.CFrame or nil
-        if THumanoid and THumanoid.Sit then return end
+        if THumanoid and THumanoid.Sit then 
+            self.IsFlinging = false
+            return 
+        end
         
         if THead then
             workspace.CurrentCamera.CameraSubject = THead
@@ -1637,7 +1646,10 @@ local function SkidFlingTarget(TargetPlayer)
             workspace.CurrentCamera.CameraSubject = THumanoid
         end
         
-        if not TCharacter:FindFirstChildWhichIsA("BasePart") then return end
+        if not TCharacter:FindFirstChildWhichIsA("BasePart") then 
+            self.IsFlinging = false
+            return 
+        end
         
         local FPos = function(BasePart, Pos, Ang)
             RootPart.CFrame = CFrame.new(BasePart.Position) * Pos * Ang
@@ -1691,9 +1703,9 @@ local function SkidFlingTarget(TargetPlayer)
             workspace.FallenPartsDestroyHeight = FPDH
         end
     end
+    self.IsFlinging = false -- Resume autofarm loop after fling completes
 end
 
--- Helper for finding the Murderer (used by the auto-shooter routine)
 local function FindPlayerWithRole(Role)
     local CRC = GetCRC()
     local Data = CRC and CRC.GetLatestPlayerData()
@@ -1718,7 +1730,6 @@ local function FindMurderer()
     return FindPlayerWithRole("Murderer")
 end
 
--- Routine to perform one shot toward the murderer with prediction
 local function ExecuteShot()
     local char = GetCharacter(_F) or Player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -1767,7 +1778,7 @@ function AutoFarm:StartSheriffFlingAndGunDropLoop()
                     for _, sheriffName in ipairs(sheriffNames) do
                         local sheriffPlayer = game.Players:FindFirstChild(sheriffName)
                         if sheriffPlayer and sheriffPlayer.Character then
-                            SkidFlingTarget(sheriffPlayer)
+                            self:SkidFlingTarget(sheriffPlayer)
                         end
                     end
                 end
@@ -1924,7 +1935,7 @@ function AutoFarm:Load()
     Farm:DetectRounds()
     Farm:StartFarmingLoop()
     Farm:StartVoteLoop()
-    Farm:StartSheriffFlingAndGunDropLoop() -- Initialized here!
+    Farm:StartSheriffFlingAndGunDropLoop()
     local WebhookConfig = GetWebhookConfig()
     if WebhookConfig and IsWebhookEventEnabled(WebhookConfig, "Stuck") then
         Farm:StartStuckMonitor()
