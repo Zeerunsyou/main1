@@ -1081,44 +1081,6 @@ function AutoFarm:Reset()
     end)
 end
 
--- Briefly attempt the same close-range launch used by launch.lua against the
--- round's murderer. The attempt is bounded and exits immediately on death.
-function AutoFarm:TryLaunchMurderer()
-    local MurdererName = self:GetPlayersWithRole("Murderer")[1]
-    local TargetPlayer = MurdererName and game:GetService("Players"):FindFirstChild(MurdererName)
-    local Character = GetCharacter(self)
-    local Humanoid = GetHumanoid(self)
-    local RootPart = GetHRP(self)
-    local TargetCharacter = TargetPlayer and TargetPlayer.Character
-    local TargetHumanoid = TargetCharacter and TargetCharacter:FindFirstChildWhichIsA("Humanoid")
-    local TargetRoot = TargetHumanoid and TargetHumanoid.RootPart
-    if not TargetRoot or not RootPart or not Humanoid or Humanoid.Health <= 0 then return end
-
-    local OldCFrame = RootPart.CFrame
-    local Deadline = os.clock() + 2
-    local Angle = 0
-    while os.clock() < Deadline and Humanoid.Health > 0 and TargetHumanoid.Health > 0 do
-        if not RootPart.Parent or not TargetRoot.Parent then break end
-        Angle += 100
-        RootPart.CFrame = CFrame.new(TargetRoot.Position) * CFrame.new(0, 1.5, 0) * CFrame.Angles(math.rad(Angle), 0, 0)
-        RootPart.AssemblyLinearVelocity = Vector3.new(9e7, 9e8, 9e7)
-        RootPart.AssemblyAngularVelocity = Vector3.new(9e8, 9e8, 9e8)
-        task.wait()
-        if Humanoid.Health <= 0 then return false end
-        RootPart.CFrame = CFrame.new(TargetRoot.Position) * CFrame.new(0, -1.5, 0) * CFrame.Angles(math.rad(Angle), 0, 0)
-        RootPart.AssemblyLinearVelocity = Vector3.new(9e7, 9e8, 9e7)
-        RootPart.AssemblyAngularVelocity = Vector3.new(9e8, 9e8, 9e8)
-        task.wait()
-    end
-
-    if Humanoid.Health > 0 and RootPart.Parent then
-        RootPart.AssemblyLinearVelocity = Vector3.zero
-        RootPart.AssemblyAngularVelocity = Vector3.zero
-        RootPart.CFrame = OldCFrame
-    end
-    return Humanoid.Health > 0
-end
-
 function AutoFarm:ReturnToSpawn(Cfg)
     if not Cfg.AutoFarm.ReturnToSpawn or not self.SpawnPos then return end
     local HRP = GetHRP(self)
@@ -1323,10 +1285,7 @@ function AutoFarm:DetectCoins()
             self:NotifyBagFull(Current, Capacity, Action)
             if Cfg.AutoFarm.Enabled then
                 if ShouldReset then
-                    task.spawn(function()
-                        local Alive = self:TryLaunchMurderer()
-                        if Alive ~= false and not self.DiedThisRound then self:Reset() end
-                    end)
+                    self:Reset()
                 else
                     self:ReturnToSpawn(Cfg)
                 end
